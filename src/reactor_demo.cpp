@@ -9,6 +9,18 @@
 #include <string>    
 #include<sys/epoll.h>
 #include "thread_pool.h"
+// 从 HTTP 请求里抠出路径（"GET /hello HTTP/1.1" → "/hello"）
+std::string parsePath(const std::string& request) {
+    size_t p1 = request.find(' ');              // 第1个空格位置
+    size_t p2 = request.find(' ', p1 + 1);      // 第2个空格位置
+
+    // 如果没找到两个空格（请求格式不对），就默认返回首页 "/"
+    if (p1 == std::string::npos || p2 == std::string::npos) {
+        return "/";
+    }
+    // 截取两个空格中间那段，就是路径
+    return request.substr(p1 + 1, p2 - p1 - 1);
+}
 
 int main(){
     int lfd=socket(AF_INET,SOCK_STREAM,0);
@@ -55,9 +67,19 @@ int main(){
                     std::string msg(buf);
                     epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
                     pool.addTask([fd,msg](){
-                        std::this_thread::sleep_for(std::chrono::seconds(2));
-                        const char* response="HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><h1>你好，我的服务器！</h1></body></html>\n";
-                        send(fd,response,strlen(response),0);
+                       std::string path=parsePath(msg);
+                        std::string response;
+                        if (path == "/") {
+                            response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                                       "<html><body><h1>Welcome to the Home Page!</h1></body></html>";
+                        } else if (path == "/hello") {
+                            response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                                       "<html><body><h1>Hello, World!</h1></body></html>";
+                        } else {
+                            response = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n"
+                                       "<html><body><h1>404 Not Found</h1></body></html>";
+                        }
+                        send(fd,response.c_str(),response.size(),0);
                         close(fd);
                     });
                     
