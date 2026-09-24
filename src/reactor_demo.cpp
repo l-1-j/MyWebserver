@@ -66,21 +66,44 @@ int main(){
                 else{
                     std::string msg(buf);
                     epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
-                    pool.addTask([fd,msg](){
-                       std::string path=parsePath(msg);
-                        std::string response;
+                    pool.addTask([fd, msg,epfd]() {
+                        std::string path = parsePath(msg);
+                        bool keepAlive=(msg.find("Connection: close") == std::string::npos);//判断客户是否需要长连接
+
+
+                        // ① 先算出正文 body 和状态行 status（分开）
+                        std::string body;
+                        std::string status = "200 OK";   // 默认成功
                         if (path == "/") {
-                            response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
-                                       "<html><body><h1>Welcome to the Home Page!</h1></body></html>";
+                            body = "<html><body><h1>Welcome to the Home Page!</h1></body></html>";
                         } else if (path == "/hello") {
-                            response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
-                                       "<html><body><h1>Hello, World!</h1></body></html>";
+                            body = "<html><body><h1>Hello, World!</h1></body></html>";
                         } else {
-                            response = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n"
-                                       "<html><body><h1>404 Not Found</h1></body></html>";
+                            status = "404 Not Found";     // 404 要改状态行
+                            body = "<html><body><h1>404 Not Found</h1></body></html>";
                         }
-                        send(fd,response.c_str(),response.size(),0);
-                        close(fd);
+
+                        // ② 拼完整响应：状态行 + 头（含 Content-Length 和 Connection）+ 空行 + 正文
+                        std::string conn = keepAlive ? "keep-alive" : "close";
+                        std::string response =
+                            "HTTP/1.1 " + status + "\r\n"
+                            "Content-Type: text/html\r\n"
+                            "Content-Length: " + std::to_string(body.size()) + "\r\n"
+                            "Connection: " + conn + "\r\n"
+                            "\r\n" + body;
+
+                        send(fd, response.c_str(), response.size(), 0);
+                        if(keepAlive){
+                            epoll_event ev3;
+                            ev3.data.fd=fd;
+                            ev3.events=EPOLLIN;
+                            epoll_ctl(epfd,EPOLL_CTL_ADD,fd,&ev3);
+                        }
+                        else{
+                            close(fd);
+                        }
+                        
+                        
                     });
                     
                 
