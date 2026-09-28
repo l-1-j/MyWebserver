@@ -13,5 +13,6 @@ class HttpConn{
     bool isKeepAlive(const std::string&request)const;
     int fd_;
     Epoller*ep_;
-   
-};
+    std::string getContentType(const std::string&path)const;
+        
+};  
