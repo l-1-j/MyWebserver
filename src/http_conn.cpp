@@ -1,7 +1,9 @@
 #include"http_conn.h"
 #include"epoller.h"
+#include <iostream>
 #include <fstream>
 #include <sstream>
+#include"log.h"
 void HttpConn::init(int fd,Epoller*ep){
     fd_=fd;
     ep_=ep;
@@ -17,6 +19,7 @@ void HttpConn::process(){
         std::string msg(buff);
         bool keepAlive=isKeepAlive(msg);
         std::string path=parsePath(msg);
+        Log::info("客户端"+ip_+"请求"+path);
         std::string body;
         std::string status="200 OK";
         std::string contentType="text/html";   // 默认类型

@@ -9,6 +9,7 @@
 #include"epoller.h"
 #include"thread_pool.h"
 #include"http_conn.h"
+#include"log.h"
 const int MAX_FD=65536;
 const int MAX_PORT=9999;
 
@@ -29,15 +30,20 @@ int main(){
     ThreadPool pool(4);
     std::vector<HttpConn>users(MAX_FD);
     ep.addFD(lfd,EPOLLIN);
-    std::cout<<"服务器成功启动，监听"<<MAX_PORT<<"端口"<<std::endl;
+    Log::info("服务器成功启动，监听"+std::to_string(MAX_PORT)+"端口");
     while(true){
         int n=ep.wait(-1);
         for(int i=0;i<n;i++){
             int fd=ep.getEventFD(i);
             if(fd==lfd){
-                int cfd=accept(lfd,nullptr,nullptr);
+                sockaddr_in clientAddr;
+                socklen_t len=sizeof(clientAddr);
+                int cfd=accept(lfd,(sockaddr*)&clientAddr,&len);
+                char ipStr[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET,&clientAddr.sin_addr,ipStr,sizeof(ipStr));
                 users[cfd].init(cfd,&ep);
-                std::cout<<"新客户连接"<<cfd<<std::endl;
+                users[cfd].setIp(ipStr);
+                Log::info("新客户连接" + std::to_string(cfd) + "来自" + ipStr);
                 ep.addFD(cfd,EPOLLIN);
             }
             else{
