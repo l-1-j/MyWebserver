@@ -7,15 +7,17 @@
 void HttpConn::init(int fd,Epoller*ep){
     fd_=fd;
     ep_=ep;
+    lastActive_=time(NULL);
 }
 void HttpConn::process(){
     char buff[1024]={0};
     int r=recv(fd_,buff,sizeof(buff),0);
     if(r<=0){
-        close(fd_);
+        closeConn();
         return;
     }
     else{
+        lastActive_=time(NULL);
         std::string msg(buff);
         bool keepAlive=isKeepAlive(msg);
         std::string path=parsePath(msg);
@@ -54,7 +56,7 @@ void HttpConn::process(){
         ep_->addFD(fd_,EPOLLIN);
        }
        else{
-        close(fd_);
+        closeConn();
        }
             
     }
@@ -79,4 +81,10 @@ std::string HttpConn::getContentType(const std::string& path) const {
     if (path.find(".png")  != std::string::npos) return "image/png";
     if (path.find(".jpg")  != std::string::npos) return "image/jpeg";
     return "application/octet-stream";   // 兜底
+}
+void HttpConn::closeConn(){
+    if(fd_!=-1){
+        close(fd_);
+        fd_=-1;
+    }
 }

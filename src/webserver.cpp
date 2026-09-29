@@ -10,8 +10,10 @@
 #include"thread_pool.h"
 #include"http_conn.h"
 #include"log.h"
+#include<ctime>
 const int MAX_FD=65536;
 const int MAX_PORT=9999;
+const int TIMEOUT=5;
 
 int main(){
     int lfd=socket(AF_INET,SOCK_STREAM,0);
@@ -32,7 +34,17 @@ int main(){
     ep.addFD(lfd,EPOLLIN);
     Log::info("服务器成功启动，监听"+std::to_string(MAX_PORT)+"端口");
     while(true){
-        int n=ep.wait(-1);
+        int n=ep.wait(1000);
+        if(n==0){
+            time_t now=time(NULL);
+            for(int i=0;i<MAX_FD;i++){
+                if(users[i].isActive()&&now-users[i].getLastActive()>TIMEOUT){
+                    users[i].closeConn();
+                    Log::info("连接"+std::to_string(i)+"超时关闭");
+                }
+            }
+            continue;
+        }
         for(int i=0;i<n;i++){
             int fd=ep.getEventFD(i);
             if(fd==lfd){
