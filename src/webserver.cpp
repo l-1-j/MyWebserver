@@ -31,8 +31,9 @@ int main(){
     Epoller ep;
     ThreadPool pool(4);
     std::vector<HttpConn>users(MAX_FD);
+    Log::getInstance().init("log.txt");
     ep.addFD(lfd,EPOLLIN);
-    Log::info("服务器成功启动，监听"+std::to_string(MAX_PORT)+"端口");
+    Log::getInstance().write(Log::INFO, "服务器成功启动，监听" + std::to_string(MAX_PORT) + "端口");
     while(true){
         int n=ep.wait(1000);
         if(n==0){
@@ -40,7 +41,7 @@ int main(){
             for(int i=0;i<MAX_FD;i++){
                 if(users[i].isActive()&&now-users[i].getLastActive()>TIMEOUT){
                     users[i].closeConn();
-                    Log::info("连接"+std::to_string(i)+"超时关闭");
+                    Log::getInstance().write(Log::INFO, "连接" + std::to_string(i) + "超时关闭");
                 }
             }
             continue;
@@ -55,7 +56,7 @@ int main(){
                 inet_ntop(AF_INET,&clientAddr.sin_addr,ipStr,sizeof(ipStr));
                 users[cfd].init(cfd,&ep);
                 users[cfd].setIp(ipStr);
-                Log::info("新客户连接" + std::to_string(cfd) + "来自" + ipStr);
+                Log::getInstance().write(Log::INFO, "新客户连接" + std::to_string(cfd) + "来自" + ipStr);
                 ep.addFD(cfd,EPOLLIN);
             }
             else{
