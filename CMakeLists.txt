@@ -16,3 +16,6 @@ add_executable(webserver src/webserver.cpp src/epoller.cpp src/http_conn.cpp src
 target_include_directories(webserver PRIVATE include)
 add_executable(block_queue_test src/block_queue_test.cpp)
 target_include_directories(block_queue_test PRIVATE include)
+add_executable(sql_test src/sql_connection_pool_test.cpp src/sql_connection_pool.cpp)
+target_include_directories(sql_test PRIVATE include)
+target_link_libraries(sql_test PRIVATE mysqlclient)

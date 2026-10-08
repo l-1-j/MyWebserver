@@ -72,7 +72,12 @@ std::string HttpConn::parsePath(const std::string&request)const{
 }
 
 bool HttpConn::isKeepAlive(const std::string&request)const{
-    return request.find("Connection: close")==std::string::npos;
+    // HTTP/1.1：默认 keep-alive，除非显式 Connection: close
+    if(request.find("HTTP/1.1")!=std::string::npos){
+        return request.find("Connection: close")==std::string::npos;
+    }
+    // HTTP/1.0：默认 close，除非显式 Connection: keep-alive
+    return request.find("Connection: keep-alive")!=std::string::npos;
 }
 std::string HttpConn::getContentType(const std::string& path) const {
     if (path.find(".html") != std::string::npos) return "text/html";
