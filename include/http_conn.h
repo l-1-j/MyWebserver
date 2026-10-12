@@ -15,7 +15,9 @@ class HttpConn{
     time_t getLastActive()const {return lastActive_;}
 
     private:
+    std::string parseBody(const std::string&request)const;
     std::string parsePath(const std::string&request)const;
+    std::string parseParam(const std::string& body, const std::string& key) const;
     bool isKeepAlive(const std::string&request)const;
     std::string getContentType(const std::string&path)const;
     

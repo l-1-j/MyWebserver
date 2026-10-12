@@ -10,6 +10,7 @@
 #include"thread_pool.h"
 #include"http_conn.h"
 #include"log.h"
+#include"sql_connection_pool.h"
 #include<ctime>
 const int MAX_FD=65536;
 const int MAX_PORT=9999;
@@ -32,6 +33,7 @@ int main(){
     ThreadPool pool(4);
     std::vector<HttpConn>users(MAX_FD);
     Log::getInstance().init("log.txt");
+    connection_pool::getInstance()->init("localhost", "webserver", "123456", "webserver", 3306, 8);
     ep.addFD(lfd,EPOLLIN);
     Log::getInstance().write(Log::INFO, "服务器成功启动，监听" + std::to_string(MAX_PORT) + "端口");
     while(true){
