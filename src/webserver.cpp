@@ -34,6 +34,8 @@ int main(){
     std::vector<HttpConn>users(MAX_FD);
     Log::getInstance().init("log.txt");
     connection_pool::getInstance()->init("localhost", "webserver", "123456", "webserver", 3306, 8);
+    std::cout << "连接池初始化完成，空闲连接：" << connection_pool::getInstance()->getFreeConn() << std::endl;
+
     ep.addFD(lfd,EPOLLIN);
     Log::getInstance().write(Log::INFO, "服务器成功启动，监听" + std::to_string(MAX_PORT) + "端口");
     while(true){

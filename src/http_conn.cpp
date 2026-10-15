@@ -5,7 +5,27 @@
 #include <fstream>
 #include <sstream>
 #include"log.h"
+#include <openssl/evp.h>
+#include <cstdio>
+#include <cstring>
 
+std::string HttpConn::sha256(const std::string&str){
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hashlen=0;
+    EVP_MD_CTX*ctx=EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx,EVP_sha256(),nullptr);
+    EVP_DigestUpdate(ctx,str.c_str(),str.size());
+    EVP_DigestFinal_ex(ctx,hash,&hashlen);
+    EVP_MD_CTX_free(ctx);
+
+    char buf[EVP_MAX_MD_SIZE*2+1];
+    for(unsigned int i=0;i<hashlen;i++){
+        std::sprintf(buf+i*2,"%02x",hash[i]);
+    }
+    buf[hashlen*2]='\0';
+    return std::string(buf);
+
+}
 void HttpConn::init(int fd,Epoller*ep){
     fd_=fd;
     ep_=ep;
@@ -35,31 +55,67 @@ void HttpConn::process(){
         else if(path=="/hello"){
             body="<html><body><h1>Hello, World!</h1></body></html>";
         }
+        //注册
         else if(path=="/register"){
             std::string reqBody = parseBody(msg);
             std::string username = parseParam(reqBody, "username");
             std::string passwd = parseParam(reqBody, "passwd");
-
+            std::string hashedPasswd = sha256(passwd);
+              
             MYSQL* conn = nullptr;
             connectionRAII raii(&conn, connection_pool::getInstance());
-
-            // ① 先查：用户名已存在吗？
-            std::string checkSql = "SELECT username FROM users WHERE username='" + username + "'";
-            mysql_query(conn, checkSql.c_str());
-            MYSQL_RES* res = mysql_store_result(conn);
-            if (mysql_num_rows(res) > 0) {
-                body = "用户名已存在";
-            } else {
-                // ② 不存在，插入
-                std::string insertSql = "INSERT INTO users(username, passwd) VALUES('" + username + "','" + passwd + "')";
-                if (mysql_query(conn, insertSql.c_str()) == 0) {
-                    body = "注册成功";
-                } else {
-                    body = "注册失败";
+           
+            //查重
+            MYSQL_STMT*stmt=mysql_stmt_init(conn);
+            if(stmt==nullptr){
+                Log::getInstance().write(Log::ERROR, "注册：连接初始化失败");
+                body="服务器错误";
+            }else{
+            if(mysql_stmt_prepare(stmt,"SELECT username FROM users WHERE username=?",strlen("SELECT username FROM users WHERE username=?"))!=0){
+                Log::getInstance().write(Log::ERROR, "注册：SQL预处理失败");
+                body="服务器错误";
+            }else{
+            MYSQL_BIND bindsql;
+            memset(&bindsql,0,sizeof(bindsql));//初始化清零
+            bindsql.buffer_type=MYSQL_TYPE_STRING;//绑定类型字符串
+            bindsql.buffer=(char*)username.c_str();//绑定数据
+            bindsql.buffer_length=username.size();
+            mysql_stmt_bind_param(stmt,&bindsql);
+            
+            mysql_stmt_execute(stmt);
+            mysql_stmt_store_result(stmt);
+            int cnt=mysql_stmt_num_rows(stmt);
+            mysql_stmt_free_result(stmt);
+            if(cnt>0){
+                body="用户已存在";
+            }else{
+                //插入新用户
+                MYSQL_STMT*stmt2=mysql_stmt_init(conn);
+                mysql_stmt_prepare(stmt2,"INSERT INTO users(username,passwd) VALUES(?,?)",strlen("INSERT INTO users(username,passwd) VALUES(?,?)"));
+                MYSQL_BIND bindins[2];
+                memset(bindins,0,sizeof(bindins));
+                bindins[0].buffer_type=MYSQL_TYPE_STRING;
+                bindins[0].buffer=(char*)username.c_str();
+                bindins[0].buffer_length=username.size();
+                bindins[1].buffer_type=MYSQL_TYPE_STRING;
+                bindins[1].buffer=(char*)hashedPasswd.c_str();
+                bindins[1].buffer_length=hashedPasswd.size();
+                mysql_stmt_bind_param(stmt2,bindins);
+                
+                if(mysql_stmt_execute(stmt2)==0){
+                    body="注册成功";
+                }else{
+                    Log::getInstance().write(Log::ERROR, "注册：插入用户失败");
+                    body="服务器错误";
                 }
+                mysql_stmt_close(stmt2);
+
             }
-            mysql_free_result(res);
+            mysql_stmt_close(stmt);
+            }
+            }
         }
+        // 登录
         else if(path=="/login"){
             std::string reqBody = parseBody(msg);
             std::string username = parseParam(reqBody, "username");
@@ -67,21 +123,46 @@ void HttpConn::process(){
 
             MYSQL* conn = nullptr;
             connectionRAII raii(&conn, connection_pool::getInstance());
+            
+            MYSQL_STMT*stmt=mysql_stmt_init(conn);
+            if(stmt==nullptr || mysql_stmt_prepare(stmt,"SELECT passwd FROM users WHERE username=?",strlen("SELECT passwd FROM users WHERE username=?"))!=0){
+                Log::getInstance().write(Log::ERROR, "登录：SQL预处理失败");
+                body="服务器错误";
+            }else{
+            //绑定输入
+            MYSQL_BIND bindUser;
+            memset(&bindUser,0,sizeof(bindUser));
+            bindUser.buffer_type=MYSQL_TYPE_STRING;
+            bindUser.buffer=(char*)username.c_str();
+            bindUser.buffer_length=username.size();
+            mysql_stmt_bind_param(stmt,&bindUser);
 
-            std::string sql = "SELECT passwd FROM users WHERE username='" + username + "'";
-            mysql_query(conn, sql.c_str());
-            MYSQL_RES* res = mysql_store_result(conn);
-            if (mysql_num_rows(res) == 0) {
-                body = "用户不存在";
-            } else {
-                MYSQL_ROW row = mysql_fetch_row(res);
-                if (passwd == row[0]) {
-                    body = "登录成功";
-                } else {
-                    body = "密码错误";
+            mysql_stmt_execute(stmt);
+            //绑定输出
+            char passwdbuf[65]={0};
+            unsigned long passwdlen=0;
+            MYSQL_BIND bindResult;
+            memset(&bindResult,0,sizeof(bindResult));
+            bindResult.buffer_type=MYSQL_TYPE_STRING;
+            bindResult.buffer=passwdbuf;
+            bindResult.buffer_length=sizeof(passwdbuf);
+            bindResult.length=&passwdlen;
+            mysql_stmt_bind_result(stmt,&bindResult);
+
+            int ret=mysql_stmt_fetch(stmt);
+            if(ret!=0){
+                body="用户不存在";
+            }else{
+                std::string dbHash(passwdbuf,passwdlen);
+                if(dbHash==sha256(passwd)){
+                    body="登录成功";
+                }else{
+                    body="密码错误";
                 }
             }
-            mysql_free_result(res);
+            mysql_stmt_close(stmt);
+            }
+
         }
         else{
             // 尝试当静态文件：www/ + 路径
