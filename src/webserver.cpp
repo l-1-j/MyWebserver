@@ -12,6 +12,7 @@
 #include"log.h"
 #include"sql_connection_pool.h"
 #include<ctime>
+#include<cerrno>
 const int MAX_FD=65536;
 const int MAX_PORT=9999;
 const int TIMEOUT=5;
@@ -39,6 +40,13 @@ int main(){
     ep.addFD(lfd,EPOLLIN);
     Log::getInstance().write(Log::INFO, "服务器成功启动，监听" + std::to_string(MAX_PORT) + "端口");
     while(true){
+        // 主线程统一关闭 worker 交还的 fd（close 和 accept 都在主线程，避免数据竞争）
+        int closeFd;
+        while(getCloseFd(closeFd)){
+            if(closeFd>=0 && closeFd<MAX_FD){
+                users[closeFd].closeConn();
+            }
+        }
         int n=ep.wait(1000);
         if(n==0){
             time_t now=time(NULL);
@@ -56,15 +64,23 @@ int main(){
                 sockaddr_in clientAddr;
                 socklen_t len=sizeof(clientAddr);
                 int cfd=accept(lfd,(sockaddr*)&clientAddr,&len);
+                if(cfd<0){
+                    Log::getInstance().write(Log::ERROR, "accept失败: " + std::string(strerror(errno)));
+                    continue;
+                }
                 char ipStr[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET,&clientAddr.sin_addr,ipStr,sizeof(ipStr));
                 users[cfd].init(cfd,&ep);
                 users[cfd].setIp(ipStr);
                 Log::getInstance().write(Log::INFO, "新客户连接" + std::to_string(cfd) + "来自" + ipStr);
-                ep.addFD(cfd,EPOLLIN);
+                if(!ep.addFD(cfd,EPOLLIN)){
+                    Log::getInstance().write(Log::ERROR, "addFD失败 fd=" + std::to_string(cfd) + ": " + std::string(strerror(errno)));
+                }
             }
             else{
-                ep.deFD(fd);
+                if(!ep.deFD(fd)){
+                    Log::getInstance().write(Log::ERROR, "deFD失败 fd=" + std::to_string(fd) + ": " + std::string(strerror(errno)));
+                }
                 pool.addTask([&users,fd](){
                     users[fd].process();
                 });

@@ -8,6 +8,28 @@
 #include <openssl/evp.h>
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
+#include <queue>
+#include <mutex>
+
+// 待关闭 fd 队列的实现（主线程 + worker 线程共享，用锁保护）
+static std::queue<int> g_closeQueue;
+static std::mutex g_closeMtx;
+
+void addCloseFd(int fd){
+    std::lock_guard<std::mutex> lock(g_closeMtx);
+    g_closeQueue.push(fd);
+}
+
+bool getCloseFd(int& fd){
+    std::lock_guard<std::mutex> lock(g_closeMtx);
+    if(g_closeQueue.empty()){
+        return false;
+    }
+    fd = g_closeQueue.front();
+    g_closeQueue.pop();
+    return true;
+}
 
 std::string HttpConn::sha256(const std::string&str){
     unsigned char hash[EVP_MAX_MD_SIZE];
@@ -36,7 +58,13 @@ void HttpConn::process(){
     char buff[1024]={0};
     int r=recv(fd_,buff,sizeof(buff),0);
     if(r<=0){
-        closeConn();
+        if(r<0){
+            Log::getInstance().write(Log::ERROR, "recv失败 fd=" + std::to_string(fd_) + " r=" + std::to_string(r) + ": " + std::string(strerror(errno)));
+        }
+        // 不在这里 close（会和主线程 accept 竞争 fd），交给主线程统一关闭
+        if(fd_!=-1){
+            addCloseFd(fd_);
+        }
         return;
     }
     else{
@@ -190,7 +218,10 @@ void HttpConn::process(){
             ep_->addFD(fd_,EPOLLIN);
         }
         else{
-            closeConn();
+            // 不在这里 close（会和主线程 accept 竞争 fd），交给主线程统一关闭
+            if(fd_!=-1){
+                addCloseFd(fd_);
+            }
         }
     }
 }

@@ -4,6 +4,12 @@
 #include<unistd.h>
 #include<ctime>
 class Epoller;
+
+// 待关闭 fd 队列：worker 线程把要关闭的 fd 放进队列，
+// 由主线程在事件循环里统一 close，避免主线程 accept 与 worker close 的数据竞争
+void addCloseFd(int fd);
+bool getCloseFd(int& fd);
+
 class HttpConn{
     public:
     explicit HttpConn():fd_(-1),ep_(nullptr){}
