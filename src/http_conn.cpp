@@ -215,7 +215,9 @@ void HttpConn::process(){
             "\r\n"+body;
         send(fd_,response.c_str(),response.size(),0);
         if(keepAlive){
-            ep_->addFD(fd_,EPOLLIN);
+            if(!ep_->modFD(fd_,EPOLLIN|EPOLLONESHOT)){
+                Log::getInstance().write(Log::ERROR, "modFD失败 fd=" + std::to_string(fd_) + ": " + std::string(strerror(errno)));
+            }
         }
         else{
             // 不在这里 close（会和主线程 accept 竞争 fd），交给主线程统一关闭

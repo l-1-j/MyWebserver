@@ -8,6 +8,7 @@ class Epoller{
     ~Epoller();
     bool addFD(int fd,uint32_t events);
     bool deFD(int fd);
+    bool modFD(int fd,uint32_t events);
     int wait(int timeout=-1);
     int getEventFD(int id)const;
     private:

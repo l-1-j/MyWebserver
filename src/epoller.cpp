@@ -15,6 +15,12 @@ bool Epoller::addFD(int fd,uint32_t events){
 bool Epoller::deFD(int fd){
     return epoll_ctl(epfd_,EPOLL_CTL_DEL,fd,nullptr)==0;
 }
+bool Epoller::modFD(int fd,uint32_t events){
+    epoll_event ev;
+    ev.data.fd=fd;
+    ev.events=events;
+    return epoll_ctl(epfd_,EPOLL_CTL_MOD,fd,&ev)==0;
+}
 int Epoller::wait(int timeout){
     return epoll_wait(epfd_,events_.data(),events_.size(),timeout);
 }

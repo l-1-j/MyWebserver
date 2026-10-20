@@ -73,14 +73,12 @@ int main(){
                 users[cfd].init(cfd,&ep);
                 users[cfd].setIp(ipStr);
                 Log::getInstance().write(Log::INFO, "新客户连接" + std::to_string(cfd) + "来自" + ipStr);
-                if(!ep.addFD(cfd,EPOLLIN)){
+                if(!ep.addFD(cfd,EPOLLIN|EPOLLONESHOT)){
                     Log::getInstance().write(Log::ERROR, "addFD失败 fd=" + std::to_string(cfd) + ": " + std::string(strerror(errno)));
                 }
             }
             else{
-                if(!ep.deFD(fd)){
-                    Log::getInstance().write(Log::ERROR, "deFD失败 fd=" + std::to_string(fd) + ": " + std::string(strerror(errno)));
-                }
+               //EPOLLONESHOT：只触发一次，必须手动重置事件
                 pool.addTask([&users,fd](){
                     users[fd].process();
                 });
