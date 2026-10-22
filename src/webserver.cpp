@@ -11,11 +11,13 @@
 #include"http_conn.h"
 #include"log.h"
 #include"sql_connection_pool.h"
+#include"timer.h"
 #include<ctime>
 #include<cerrno>
+
 const int MAX_FD=65536;
 const int MAX_PORT=9999;
-const int TIMEOUT=5;
+
 
 int main(){
     int lfd=socket(AF_INET,SOCK_STREAM,0);
@@ -39,25 +41,34 @@ int main(){
 
     ep.addFD(lfd,EPOLLIN);
     Log::getInstance().write(Log::INFO, "服务器成功启动，监听" + std::to_string(MAX_PORT) + "端口");
+    TimerHeap &timer=TimerHeap::getInstance();//启动小根堆定时器
     while(true){
-        // 主线程统一关闭 worker 交还的 fd（close 和 accept 都在主线程，避免数据竞争）
+        //主线程统一关闭交还的fd,这一块主要处理worker线程里面断开连接的fd
         int closeFd;
         while(getCloseFd(closeFd)){
-            if(closeFd>=0 && closeFd<MAX_FD){
+            if(closeFd>=0&&closeFd<MAX_FD){
                 users[closeFd].closeConn();
+                timer.delTimer(closeFd);
             }
         }
-        int n=ep.wait(1000);
-        if(n==0){
-            time_t now=time(NULL);
-            for(int i=0;i<MAX_FD;i++){
-                if(users[i].isActive()&&now-users[i].getLastActive()>TIMEOUT){
-                    users[i].closeConn();
-                    Log::getInstance().write(Log::INFO, "连接" + std::to_string(i) + "超时关闭");
-                }
+        //触发所以空闲超时的连接
+        std::vector<int>expired;
+        timer.tick(expired);
+        //这一块主要处理连接开始就超时的连接
+        for(int fd:expired){
+            if(fd>=0&&fd<MAX_FD&&users[fd].isActive()){
+                users[fd].closeConn();
+                Log::getInstance().write(Log::INFO, "连接" + std::to_string(fd) + "超时关闭");
             }
-            continue;
         }
+        //epoll_wait 超时时间等于最近一个定时器的到时时间（空堆就-1，一直阻塞）
+        int timeout=-1;
+        time_t topExpire=timer.topExpire();
+        if(topExpire!=-1){
+            timeout=(topExpire-time(NULL))*1000;
+            if(timeout<0) timeout=0;
+        }
+        int n=ep.wait(timeout);
         for(int i=0;i<n;i++){
             int fd=ep.getEventFD(i);
             if(fd==lfd){
@@ -76,9 +87,11 @@ int main(){
                 if(!ep.addFD(cfd,EPOLLIN|EPOLLONESHOT)){
                     Log::getInstance().write(Log::ERROR, "addFD失败 fd=" + std::to_string(cfd) + ": " + std::string(strerror(errno)));
                 }
+                timer.addTimer(cfd,time(NULL)+TIMEOUT);
             }
             else{
                //EPOLLONESHOT：只触发一次，必须手动重置事件
+                timer.delTimer(fd);//交给worker处理，暂停计时
                 pool.addTask([&users,fd](){
                     users[fd].process();
                 });

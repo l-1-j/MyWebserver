@@ -11,9 +11,10 @@
 #include <cerrno>
 #include <queue>
 #include <mutex>
+#include"timer.h"
 
 // 待关闭 fd 队列的实现（主线程 + worker 线程共享，用锁保护）
-static std::queue<int> g_closeQueue;
+static std::queue<int> g_closeQueue;//专门用来接收worker线程里面的断开的连接
 static std::mutex g_closeMtx;
 
 void addCloseFd(int fd){
@@ -218,6 +219,7 @@ void HttpConn::process(){
             if(!ep_->modFD(fd_,EPOLLIN|EPOLLONESHOT)){
                 Log::getInstance().write(Log::ERROR, "modFD失败 fd=" + std::to_string(fd_) + ": " + std::string(strerror(errno)));
             }
+            TimerHeap::getInstance().addTimer(fd_,time(NULL)+TIMEOUT);
         }
         else{
             // 不在这里 close（会和主线程 accept 竞争 fd），交给主线程统一关闭
