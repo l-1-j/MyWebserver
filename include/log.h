@@ -26,6 +26,13 @@ class Log{
         }
         queue_.push(getTime()+" "+msg);
     }
+    //优雅退出，关闭队列，等后台写完剩余日志再退出
+    void stop(){
+        queue_.close();
+        if(writer_.joinable()){
+            writer_.join();
+        }
+    }
     std::string getTime(){
         time_t now=time(NULL);
         struct tm t;
@@ -38,12 +45,14 @@ class Log{
     Log():level_(INFO),queue_(1024){}
     Log(const Log&)=delete;
     Log&operator=(const Log&)=delete;
+    
     void writeLoop(){
-        while(true){
-            std::string msg=queue_.pop();
+        std::string msg;
+        while(queue_.pop(msg)){
             file_<<msg<<std::endl;
             std::cout<<msg<<std::endl;
         }
+        file_.flush();
     }
 
     Level level_;

@@ -17,7 +17,9 @@ int main() {
     std::thread consumer([&q]() {
         long long sum = 0;
         for (int i = 0; i < 100; i++) {
-            sum += q.pop();
+            int v=0;
+            q.pop(v);
+            sum+=v;
         }
         std::cout << "消费者完成，总和 = " << sum << std::endl;
     });
