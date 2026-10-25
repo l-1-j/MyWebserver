@@ -12,6 +12,7 @@
 #include <queue>
 #include <mutex>
 #include"timer.h"
+#include"session.h"
 
 // 待关闭 fd 队列的实现（主线程 + worker 线程共享，用锁保护）
 static std::queue<int> g_closeQueue;//专门用来接收worker线程里面的断开的连接
@@ -74,9 +75,10 @@ void HttpConn::process(){
         bool keepAlive=isKeepAlive(msg);
         std::string path=parsePath(msg);
         Log::getInstance().write(Log::INFO, "客户端" + ip_ + "请求" + path);
-        std::string body;
+        std::string body;//请求体
         std::string status="200 OK";
         std::string contentType="text/html";   // 默认类型
+        std::string extraHeaders;//存放额外响应头
 
         if(path=="/") {
             body="<html><body><h1>Welcome to the Home Page!</h1></body></html>";
@@ -104,6 +106,7 @@ void HttpConn::process(){
                 Log::getInstance().write(Log::ERROR, "注册：SQL预处理失败");
                 body="服务器错误";
             }else{
+            //sql预处理，防止sql注入
             MYSQL_BIND bindsql;
             memset(&bindsql,0,sizeof(bindsql));//初始化清零
             bindsql.buffer_type=MYSQL_TYPE_STRING;//绑定类型字符串
@@ -184,7 +187,13 @@ void HttpConn::process(){
             }else{
                 std::string dbHash(passwdbuf,passwdlen);
                 if(dbHash==sha256(passwd)){
-                    body="登录成功";
+                    //密码正确，建session，发cookie，302跳转到欢迎页面
+                    std::string sid=SessionManager::getInstance().createSession(username);
+                    status="302 Found";
+                    extraHeaders += "Set-Cookie: sid=" + sid + "; Path=/\r\n";
+                    extraHeaders += "Location: /welcome\r\n";
+                    body = "";   // 302 重定向不需要 body
+                    
                 }else{
                     body="密码错误";
                 }
@@ -192,6 +201,18 @@ void HttpConn::process(){
             mysql_stmt_close(stmt);
             }
 
+        }
+        else if(path=="/welcome"){
+            std::string sid=parseCookie(msg);
+            std::string username=SessionManager::getInstance().getUsername(sid);
+            if(username.empty()){
+                //没登录成就session失败，返回首页
+                status="302 Found";
+                extraHeaders+="Location: /\r\n";
+                body="";
+            }else{
+                body="<html><body><h1>欢迎，" + username + "！</h1></body></html>";
+            }
         }
         else{
             // 尝试当静态文件：www/ + 路径
@@ -213,6 +234,7 @@ void HttpConn::process(){
             "Content-Type: "+contentType+"\r\n"
             "Content-Length: "+std::to_string(body.size())+"\r\n"
             "Connection: "+conn+"\r\n"
+            + extraHeaders +
             "\r\n"+body;
         send(fd_,response.c_str(),response.size(),0);
         if(keepAlive){
@@ -229,6 +251,29 @@ void HttpConn::process(){
         }
     }
 }
+
+std::string HttpConn::parseCookie(const std::string&request)const{
+    std::string key="Cookie: ";
+    size_t pos=request.find(key);
+    if(pos==std::string::npos){
+        return"";
+    }
+    pos+=key.size();
+    size_t end=request.find("\r\n",pos);
+    std::string line=request.substr(pos,end-pos);
+
+    size_t eq=line.find("sid=");
+    if(eq==std::string::npos){
+        return"";
+    }
+    eq+=4;
+    size_t semi=line.find(";",eq);
+    if(semi==std::string::npos){
+        semi=line.size();
+    }
+    return line.substr(eq,semi-eq);
+}
+
 
 std::string HttpConn::parsePath(const std::string&request)const{
     size_t pos=request.find(" ");

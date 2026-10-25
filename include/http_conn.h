@@ -22,6 +22,7 @@ class HttpConn{
 
     private:
     std::string sha256(const std::string&str);
+    std::string parseCookie(const std::string&request)const;
     std::string parseBody(const std::string&request)const;
     std::string parsePath(const std::string&request)const;
     std::string parseParam(const std::string& body, const std::string& key) const;
