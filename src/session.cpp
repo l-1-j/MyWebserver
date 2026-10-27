@@ -15,7 +15,7 @@ std::string SessionManager::generateId(){
 std::string SessionManager::createSession(const std::string&username){
     std::string sid=generateId();
     std::lock_guard<std::mutex>lock(mtx_);
-    sessions_[sid]=username;
+    sessions_[sid]={username,time(NULL)+SESSION_EXPIRE};
     return sid;
 }
 
@@ -25,7 +25,12 @@ std::string SessionManager::getUsername(const std::string&sid){
     if(it ==sessions_.end()){
         return"";
     }
-    return it->second;
+    //惰性清理，查的时候发现过期了，顺手删掉
+    if(it->second.expire<time(NULL)){
+        sessions_.erase(it);
+        return"";
+    }
+    return it->second.username;
 }
 
 void SessionManager::removeSession(const std::string&sid){

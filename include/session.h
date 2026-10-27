@@ -3,7 +3,9 @@
 #include<map>
 #include<mutex>
 #include<random>
+#include<ctime>
 
+inline constexpr int SESSION_EXPIRE=1800;//有效期30分钟
 class SessionManager{
     public:
     static SessionManager&getInstance(){
@@ -26,7 +28,13 @@ class SessionManager{
     SessionManager&operator=(const SessionManager&)=delete;
 
     std::string generateId();//随机生成32为hax字符
+    
+    //一条session:用户名＋过期时间戳
+    struct Session{
+        std::string username;
+        time_t expire;
+    };
 
-    std::map<std::string,std::string>sessions_; //sid->username;
+    std::map<std::string,Session>sessions_; //sid->session;
     std::mutex mtx_;
 };
