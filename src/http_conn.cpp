@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <queue>
 #include <mutex>
+#include<fcntl.h>
 #include"timer.h"
 #include"session.h"
 
@@ -18,7 +19,7 @@
 static std::queue<int> g_closeQueue;//专门用来接收worker线程里面的断开的连接
 static std::mutex g_closeMtx;
 
-void addCloseFd(int fd){
+void   addCloseFd(int fd){
     std::lock_guard<std::mutex> lock(g_closeMtx);
     g_closeQueue.push(fd);
 }
@@ -54,43 +55,144 @@ void HttpConn::init(int fd,Epoller*ep){
     fd_=fd;
     ep_=ep;
     lastActive_=time(NULL);
+    //将fd修改为非阻塞
+    int oldFlag=fcntl(fd,F_GETFL);
+    fcntl(fd,F_SETFL,oldFlag|O_NONBLOCK);
+}
+
+// 从状态机：从 checkIdx_ 开始抠出一行（到 \r\n）
+LINE_STATUS HttpConn::parseLine(){
+    size_t pos=readBuf_.find("\r\n",checkIdx_);
+    if(pos==std::string::npos){
+        return LINE_OPEN;   // 还没凑齐一行（半包）
+    }
+    lineStart_=checkIdx_;
+    lineEnd_=pos;
+    checkIdx_=pos+2;        // 跳过 \r\n
+    return LINE_OK;
+}
+
+// 主状态机：循环解析，直到请求完整 或 数据不够
+HTTP_CODE HttpConn::processRead(){
+    while(true){
+        if(checkState_==CHECK_STATE_CONTENT){
+            return parseContent();   // 请求体按字节判断，不走行
+        }
+        LINE_STATUS st=parseLine();
+        if(st==LINE_OPEN){
+            return NO_REQUEST;       // 行不完整，等下次 recv
+        }
+        std::string line=readBuf_.substr(lineStart_,lineEnd_-lineStart_);
+        if(checkState_==CHECK_STATE_REQUESTLINE){
+            if(parseRequestLine(line)==BAD_REQUEST) return BAD_REQUEST;
+        }else if(checkState_==CHECK_STATE_HEADER){
+            HTTP_CODE c=parseHeaders(line);
+            if(c==BAD_REQUEST) return BAD_REQUEST;
+            if(c==GET_REQUEST) return GET_REQUEST;
+        }
+    }
+}
+
+// 解析请求行："GET /hello HTTP/1.1"
+HTTP_CODE HttpConn::parseRequestLine(const std::string& line){
+    size_t p1=line.find(' ');
+    if(p1==std::string::npos) return BAD_REQUEST;
+    size_t p2=line.find(' ',p1+1);
+    if(p2==std::string::npos) return BAD_REQUEST;
+    method_=line.substr(0,p1);
+    path_=line.substr(p1+1,p2-p1-1);
+    checkState_=CHECK_STATE_HEADER;
+    return NO_REQUEST;
+}
+
+// 解析请求头：逐行，遇到空行表示头结束
+HTTP_CODE HttpConn::parseHeaders(const std::string& line){
+    if(line.empty()){
+        // 空行 = 请求头结束
+        if(contentLength_>0){
+            checkState_=CHECK_STATE_CONTENT;
+            return NO_REQUEST;
+        }
+        return GET_REQUEST;   // 无 body（GET），请求完整
+    }
+    size_t pos=line.find("Content-Length:");
+    if(pos!=std::string::npos){
+        contentLength_=std::stoi(line.substr(pos+15));   // "Content-Length:" 是 15 字符
+    }
+    return NO_REQUEST;
+}
+
+// 解析请求体：检查 body 是否按 Content-Length 读齐了
+HTTP_CODE HttpConn::parseContent(){
+    if(readBuf_.size()-checkIdx_ >= (size_t)contentLength_){
+        body_=readBuf_.substr(checkIdx_,contentLength_);
+        checkIdx_+=contentLength_;
+        return GET_REQUEST;
+    }
+    return NO_REQUEST;
 }
 
 void HttpConn::process(){
     char buff[1024]={0};
-    int r=recv(fd_,buff,sizeof(buff),0);
-    if(r<=0){
-        if(r<0){
-            Log::getInstance().write(Log::ERROR, "recv失败 fd=" + std::to_string(fd_) + " r=" + std::to_string(r) + ": " + std::string(strerror(errno)));
+    while(true){
+        int r=recv(fd_,buff,sizeof(buff),0);
+        if(r>0){
+            readBuf_.append(buff,r);
+            lastActive_=time(NULL);
+            continue;
         }
-        // 不在这里 close（会和主线程 accept 竞争 fd），交给主线程统一关闭
-        if(fd_!=-1){
-            addCloseFd(fd_);
+        else if(r==0){
+            //客户端断开连接
+            if(fd_!=-1)addCloseFd(fd_);
+            return;
         }
-        return;
+        else{//r<0
+            if(errno==EAGAIN||errno==EWOULDBLOCK){
+                break;//读完了开始处理
+            }
+            if(errno==EINTR){
+                continue;//被信号打断重试
+            }
+            Log::getInstance().write(Log::ERROR, "recv失败 fd=" + std::to_string(fd_) + ": " + std::string(strerror(errno)));
+            if(fd_!=-1) addCloseFd(fd_);
+            return;
+        }
     }
-    else{
-        lastActive_=time(NULL);
-        std::string msg(buff);
-        bool keepAlive=isKeepAlive(msg);
-        std::string path=parsePath(msg);
-        Log::getInstance().write(Log::INFO, "客户端" + ip_ + "请求" + path);
+
+    bool keepAlive=true;
+    // 循环处理缓冲里的完整请求：一次 recv 可能粘了多个请求（粘包）
+    while(true){
+        // 状态机解析
+        HTTP_CODE code=processRead();
+        if(code==NO_REQUEST){
+            // 半包：数据没读完，重新挂上事件，等下次触发继续读
+            if(!ep_->modFD(fd_,EPOLLIN|EPOLLET|EPOLLONESHOT)){
+                Log::getInstance().write(Log::ERROR, "modFD失败 fd=" + std::to_string(fd_) + ": " + std::string(strerror(errno)));
+            }
+            TimerHeap::getInstance().addTimer(fd_,time(NULL)+TIMEOUT);
+            return;
+        }
+        if(code==BAD_REQUEST||code==INTERNAL_ERROR){
+            if(fd_!=-1) addCloseFd(fd_);
+            return;
+        }
+
+        Log::getInstance().write(Log::INFO, "客户端" + ip_ + "请求" + path_);
         std::string body;//请求体
         std::string status="200 OK";
         std::string contentType="text/html";   // 默认类型
         std::string extraHeaders;//存放额外响应头
 
-        if(path=="/") {
+        if(path_=="/") {
             body="<html><body><h1>Welcome to the Home Page!</h1></body></html>";
         }
-        else if(path=="/hello"){
+        else if(path_=="/hello"){
             body="<html><body><h1>Hello, World!</h1></body></html>";
         }
         //注册
-        else if(path=="/register"){
-            std::string reqBody = parseBody(msg);
-            std::string username = parseParam(reqBody, "username");
-            std::string passwd = parseParam(reqBody, "passwd");
+        else if(path_=="/register"){
+            std::string username = parseParam(body_, "username");
+            std::string passwd = parseParam(body_, "passwd");
             std::string hashedPasswd = sha256(passwd);
               
             MYSQL* conn = nullptr;
@@ -148,10 +250,9 @@ void HttpConn::process(){
             }
         }
         // 登录
-        else if(path=="/login"){
-            std::string reqBody = parseBody(msg);
-            std::string username = parseParam(reqBody, "username");
-            std::string passwd = parseParam(reqBody, "passwd");
+        else if(path_=="/login"){
+            std::string username = parseParam(body_, "username");
+            std::string passwd = parseParam(body_, "passwd");
 
             MYSQL* conn = nullptr;
             connectionRAII raii(&conn, connection_pool::getInstance());
@@ -202,8 +303,8 @@ void HttpConn::process(){
             }
 
         }
-        else if(path=="/welcome"){
-            std::string sid=parseCookie(msg);
+        else if(path_=="/welcome"){
+            std::string sid=parseCookie(readBuf_);
             std::string username=SessionManager::getInstance().getUsername(sid);
             if(username.empty()){
                 //没登录成就session失败，返回首页
@@ -216,18 +317,20 @@ void HttpConn::process(){
         }
         else{
             // 尝试当静态文件：www/ + 路径
-            std::ifstream file("www" + path, std::ios::binary);
+            std::ifstream file("www" + path_, std::ios::binary);
             if (file) {
                 std::ostringstream ss;
                 ss << file.rdbuf();
                 body = ss.str();
-                contentType = getContentType(path);
+                contentType = getContentType(path_);
             } else {
                 status = "404 Not Found";
                 body = "<html><body><h1>404 Not Found</h1></body></html>";
             }
         }
 
+        // 只看当前这个请求的头部（checkIdx_ 之前），别把缓冲里下一个请求的 Connection 也算进来
+        keepAlive=isKeepAlive(readBuf_.substr(0, checkIdx_));
         std::string conn=keepAlive?"keep-alive":"close";
         std::string response=
             "HTTP/1.1 "+status+"\r\n"
@@ -237,17 +340,30 @@ void HttpConn::process(){
             + extraHeaders +
             "\r\n"+body;
         send(fd_,response.c_str(),response.size(),0);
-        if(keepAlive){
-            if(!ep_->modFD(fd_,EPOLLIN|EPOLLONESHOT)){
-                Log::getInstance().write(Log::ERROR, "modFD失败 fd=" + std::to_string(fd_) + ": " + std::string(strerror(errno)));
-            }
-            TimerHeap::getInstance().addTimer(fd_,time(NULL)+TIMEOUT);
+
+        // 消费掉这一个请求，保留缓冲里剩余的字节（粘包的下一个请求）
+        readBuf_.erase(0, checkIdx_);
+        checkState_=CHECK_STATE_REQUESTLINE;
+        checkIdx_=0;
+        contentLength_=0;
+        body_.clear();
+
+        // 本请求要求关闭连接，或缓冲里没有剩余请求了，就退出循环
+        if(!keepAlive || readBuf_.empty()){
+            break;
         }
-        else{
-            // 不在这里 close（会和主线程 accept 竞争 fd），交给主线程统一关闭
-            if(fd_!=-1){
-                addCloseFd(fd_);
-            }
+    }
+
+    if(keepAlive){
+        if(!ep_->modFD(fd_,EPOLLIN|EPOLLET|EPOLLONESHOT)){
+            Log::getInstance().write(Log::ERROR, "modFD失败 fd=" + std::to_string(fd_) + ": " + std::string(strerror(errno)));
+        }
+        TimerHeap::getInstance().addTimer(fd_,time(NULL)+TIMEOUT);
+    }
+    else{
+        // 不在这里 close（会和主线程 accept 竞争 fd），交给主线程统一关闭
+        if(fd_!=-1){
+            addCloseFd(fd_);
         }
     }
 }
@@ -274,23 +390,6 @@ std::string HttpConn::parseCookie(const std::string&request)const{
     return line.substr(eq,semi-eq);
 }
 
-
-std::string HttpConn::parsePath(const std::string&request)const{
-    size_t pos=request.find(" ");
-    size_t pos2=request.find(" ",pos+1);
-    if(pos==std::string::npos||pos2==std::string::npos){
-        return "/";
-    }
-    return request.substr(pos+1,pos2-pos-1);
-}
-
-std::string HttpConn::parseBody(const std::string&request)const{
-    size_t pos=request.find("\r\n\r\n");
-    if(pos==std::string::npos){
-        return "";
-    }
-    return request.substr(pos+4);
-}
 
 std::string HttpConn::parseParam(const std::string& body, const std::string& key) const {
     std::string target = key + "=";

@@ -57,6 +57,8 @@ int main(){
     sa.sa_flags=0;//行为标志设置为0，接收到打断信号后返回-1，errno=EINTR
     sigaction(SIGINT,&sa,nullptr);//参数1传入要处理的信号，参数2传入新的处理方式，参数3传出旧的处理方式
     sigaction(SIGTERM,&sa,nullptr);
+    signal(SIGPIPE, SIG_IGN);
+
     while(!g_stop){
         //主线程统一关闭交还的fd,这一块主要处理worker线程里面断开连接的fd
         int closeFd;
@@ -106,7 +108,7 @@ int main(){
                 users[cfd].init(cfd,&ep);
                 users[cfd].setIp(ipStr);
                 Log::getInstance().write(Log::INFO, "新客户连接" + std::to_string(cfd) + "来自" + ipStr);
-                if(!ep.addFD(cfd,EPOLLIN|EPOLLONESHOT)){
+                if(!ep.addFD(cfd,EPOLLIN|EPOLLET|EPOLLONESHOT)){
                     Log::getInstance().write(Log::ERROR, "addFD失败 fd=" + std::to_string(cfd) + ": " + std::string(strerror(errno)));
                 }
                 timer.addTimer(cfd,time(NULL)+TIMEOUT);
