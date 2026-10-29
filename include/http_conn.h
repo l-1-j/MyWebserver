@@ -40,6 +40,7 @@ class HttpConn{
     HTTP_CODE parseRequestLine(const std::string& line);
     HTTP_CODE parseHeaders(const std::string& line);
     HTTP_CODE parseContent();
+    bool write();   // 非阻塞发送响应，能发多少发多少，返回是否全部发完
     
     int fd_;
     Epoller*ep_;
@@ -57,5 +58,10 @@ class HttpConn{
     std::string method_;
     std::string path_;
     std::string body_;
+
+    // 写缓冲区 + 发送状态
+    std::string writeBuf_;   // 待发送的响应（没发完的部分留在这里续写）
+    size_t writeIdx_=0;      // 已经发出去的字节偏移
+    bool keepAlive_=true;    // 当前响应的 keep-alive 状态
 
 };  

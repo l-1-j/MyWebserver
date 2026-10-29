@@ -55,6 +55,15 @@ void HttpConn::init(int fd,Epoller*ep){
     fd_=fd;
     ep_=ep;
     lastActive_=time(NULL);
+    // fd 复用时会拿到旧的 HttpConn 对象，把残留状态清干净
+    readBuf_.clear();
+    writeBuf_.clear();
+    writeIdx_=0;
+    checkState_=CHECK_STATE_REQUESTLINE;
+    checkIdx_=0;
+    contentLength_=0;
+    body_.clear();
+    keepAlive_=true;
     //将fd修改为非阻塞
     int oldFlag=fcntl(fd,F_GETFL);
     fcntl(fd,F_SETFL,oldFlag|O_NONBLOCK);
@@ -132,7 +141,54 @@ HTTP_CODE HttpConn::parseContent(){
     return NO_REQUEST;
 }
 
+// 非阻塞发送响应：能发多少发多少，返回是否全部发完
+bool HttpConn::write(){
+    while(writeIdx_ < writeBuf_.size()){
+        ssize_t r=send(fd_, writeBuf_.c_str()+writeIdx_, writeBuf_.size()-writeIdx_, 0);
+        if(r>0){
+            writeIdx_+=r;
+            lastActive_=time(NULL);
+        }
+        else if(r<0){
+            if(errno==EAGAIN||errno==EWOULDBLOCK){
+                return false;   // 发送缓冲满，没写完，等 EPOLLOUT 再续写
+            }
+            if(errno==EINTR){
+                continue;       // 被信号打断，重试
+            }
+            // 其他错误（含 EPIPE，SIGPIPE 已全局忽略）：关闭连接
+            if(fd_!=-1) addCloseFd(fd_);
+            return false;
+        }
+        else{//r==0 对端关闭
+            if(fd_!=-1) addCloseFd(fd_);
+            return false;
+        }
+    }
+    writeBuf_.clear();
+    writeIdx_=0;
+    return true;
+}
+
 void HttpConn::process(){
+    // 上次响应还没写完（EPOLLOUT 触发），先继续写完
+    if(!writeBuf_.empty()){
+        if(!write()){
+            // 还是没写完，继续挂 EPOLLOUT 等可写
+            if(!ep_->modFD(fd_,EPOLLOUT|EPOLLET|EPOLLONESHOT)){
+                Log::getInstance().write(Log::ERROR, "modFD失败 fd=" + std::to_string(fd_) + ": " + std::string(strerror(errno)));
+            }
+            TimerHeap::getInstance().addTimer(fd_,time(NULL)+TIMEOUT);
+            return;
+        }
+        // 写完了。若这个响应要求关闭连接，写完直接关
+        if(!keepAlive_){
+            if(fd_!=-1) addCloseFd(fd_);
+            return;
+        }
+        // 否则继续往下：读新数据 + 处理缓冲里可能残留的粘包请求
+    }
+
     char buff[1024]={0};
     while(true){
         int r=recv(fd_,buff,sizeof(buff),0);
@@ -159,7 +215,6 @@ void HttpConn::process(){
         }
     }
 
-    bool keepAlive=true;
     // 循环处理缓冲里的完整请求：一次 recv 可能粘了多个请求（粘包）
     while(true){
         // 状态机解析
@@ -330,8 +385,8 @@ void HttpConn::process(){
         }
 
         // 只看当前这个请求的头部（checkIdx_ 之前），别把缓冲里下一个请求的 Connection 也算进来
-        keepAlive=isKeepAlive(readBuf_.substr(0, checkIdx_));
-        std::string conn=keepAlive?"keep-alive":"close";
+        keepAlive_=isKeepAlive(readBuf_.substr(0, checkIdx_));
+        std::string conn=keepAlive_?"keep-alive":"close";
         std::string response=
             "HTTP/1.1 "+status+"\r\n"
             "Content-Type: "+contentType+"\r\n"
@@ -339,22 +394,33 @@ void HttpConn::process(){
             "Connection: "+conn+"\r\n"
             + extraHeaders +
             "\r\n"+body;
-        send(fd_,response.c_str(),response.size(),0);
 
-        // 消费掉这一个请求，保留缓冲里剩余的字节（粘包的下一个请求）
+        // 先消费掉这一个请求（保留缓冲里剩余的字节），再发响应。
+        // 这样即使 send 没发完（EAGAIN）提前返回，状态也已重置，续写完能正确解析下一个粘包请求
         readBuf_.erase(0, checkIdx_);
         checkState_=CHECK_STATE_REQUESTLINE;
         checkIdx_=0;
         contentLength_=0;
         body_.clear();
 
+        // 非阻塞发送：没发完的部分留在 writeBuf_，挂 EPOLLOUT 续写
+        writeBuf_=response;
+        writeIdx_=0;
+        if(!write()){
+            if(!ep_->modFD(fd_,EPOLLOUT|EPOLLET|EPOLLONESHOT)){
+                Log::getInstance().write(Log::ERROR, "modFD失败 fd=" + std::to_string(fd_) + ": " + std::string(strerror(errno)));
+            }
+            TimerHeap::getInstance().addTimer(fd_,time(NULL)+TIMEOUT);
+            return;
+        }
+
         // 本请求要求关闭连接，或缓冲里没有剩余请求了，就退出循环
-        if(!keepAlive || readBuf_.empty()){
+        if(!keepAlive_ || readBuf_.empty()){
             break;
         }
     }
 
-    if(keepAlive){
+    if(keepAlive_){
         if(!ep_->modFD(fd_,EPOLLIN|EPOLLET|EPOLLONESHOT)){
             Log::getInstance().write(Log::ERROR, "modFD失败 fd=" + std::to_string(fd_) + ": " + std::string(strerror(errno)));
         }
